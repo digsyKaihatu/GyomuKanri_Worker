@@ -72,6 +72,13 @@ export default {
         }
         date = date.replace(/^[?&]?date=/, '').trim();
 
+        if (!env.FIREBASE_SERVICE_ACCOUNT) {
+  return new Response(JSON.stringify({
+    success: false,
+    error: "FIREBASE_SERVICE_ACCOUNT が Worker に存在しません。シークレット設定を確認してください。"
+  }), { status: 500, headers: corsHeaders });
+}
+
         const serviceAccount = JSON.parse(env.FIREBASE_SERVICE_ACCOUNT);
         const token = await getAccessToken(serviceAccount);
         const projectId = serviceAccount.project_id;
