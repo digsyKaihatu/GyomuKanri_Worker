@@ -1,0 +1,12 @@
+# Node 依存関係
+node_modules/
+
+# Cloudflare Wrangler のキャッシュ・ビルド出力
+.wrangler/
+dist/
+
+# 環境変数・ローカル秘密情報
+.env
+.env.*
+*.pem
+service-account*.json
