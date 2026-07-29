@@ -1,4 +1,4 @@
-# Node 依存関係
+# Node 依存関係A
 node_modules/
 
 # Cloudflare Wrangler のキャッシュ・ビルド出力
