@@ -1,1 +1,24 @@
 
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "business-management-worker",
+  "main": "src/index.js",
+  "compatibility_date": "2026-01-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "production-db",
+      "database_id": "<YOUR_D1_DATABASE_ID>"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "IMAGE_BUCKET",
+      "bucket_name": "app-media-storage"
+    }
+  ],
+  "triggers": {
+    "crons": ["* * * * *"]
+  }
+}
