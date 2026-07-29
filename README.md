@@ -1,3 +1,4 @@
+```text
 my-worker-backend/
 ├── wrangler.jsonc
 ├── package.json
@@ -13,3 +14,4 @@ my-worker-backend/
     │   ├── firebaseService.js    # Firestore API & FCM 通知処理
     │   └── cacheService.js       # CDN キャッシュ削除処理
     └── index.js                  # エントリーポイント (Fetch & Cron ハンドラー)
+```
