@@ -1,1 +1,15 @@
-
+{
+  "name": "business-management-worker",
+  "version": "1.0.0",
+  "description": "業務管理システム Cloudflare Worker バックエンド",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail"
+  },
+  "devDependencies": {
+    "wrangler": "^3.0.0"
+  }
+}
