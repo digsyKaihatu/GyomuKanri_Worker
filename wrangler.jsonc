@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "gyomukanri-worker",
+  "name": "muddy-night-4bd4",
   "main": "worker.js",
   "compatibility_date": "2026-01-01",
   "compatibility_flags": ["nodejs_compat"],
