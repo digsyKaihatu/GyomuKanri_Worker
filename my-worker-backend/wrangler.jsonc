@@ -1,15 +1,15 @@
 
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "business-management-worker",
+  "name": "muddy-night-4bd4",
   "main": "src/index.js",
   "compatibility_date": "2026-01-01",
   "compatibility_flags": ["nodejs_compat"],
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "production-db",
-      "database_id": "<YOUR_D1_DATABASE_ID>"
+      "database_name": "gyomu-db",
+      "database_id": "c20b8cde-a7d9-450e-a2d9-c4804943f33c"
     }
   ],
   "r2_buckets": [
