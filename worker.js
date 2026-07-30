@@ -1020,3 +1020,57 @@ async function aggregateAndSaveDate(dateStr, projectId, token) {
   }
   return { logsCount: parsedLogs.length };
 }
+
+/**
+ * 💡 ピンポイント更新用ヘルパー (Read数: たった1回)
+ * 全件検索を行わず、daily_summaries/{dateStr} の1件だけを取得してメモリ上で差分更新・削除を行う
+ */
+async function updateDailySummaryInPlace(dateStr, updatedLogsList, deletedLogIds = [], projectId, token) {
+  const fsUrl = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents/daily_summaries/${dateStr}`;
+  
+  // 1. daily_summaries 1件だけを直接取得 (1 Read)
+  const res = await fetch(fsUrl, { headers: { 'Authorization': `Bearer ${token}` } });
+  if (!res.ok) {
+    // ドキュメントが存在しない(404)場合は、次回アクセス時に自動再集計されるため何もしなくてOK
+    return;
+  }
+
+  const doc = await res.json();
+  let logs = [];
+  try {
+    logs = JSON.parse(doc.fields?.logsJson?.stringValue || "[]");
+  } catch (e) {
+    logs = [];
+  }
+
+  // 2. 退勤忘れ等で削除されたログを除外
+  if (deletedLogIds.length > 0) {
+    const deleteSet = new Set(deletedLogIds);
+    logs = logs.filter(l => !deleteSet.has(l.id));
+  }
+
+  // 3. 承認された差分ログを反映（既存ログは上書き更新、新規ログは追加）
+  for (const updatedLog of updatedLogsList) {
+    const idx = logs.findIndex(l => l.id === updatedLog.id);
+    if (idx !== -1) {
+      logs[idx] = { ...logs[idx], ...updatedLog };
+    } else {
+      logs.push(updatedLog);
+    }
+  }
+
+  // 4. daily_summaries を上書き保存 (1 Write)
+  const saveBody = {
+    fields: {
+      date: { stringValue: dateStr },
+      logsJson: { stringValue: JSON.stringify(logs) },
+      updatedAt: { timestampValue: getJSTISOString() }
+    }
+  };
+
+  await fetch(fsUrl, {
+    method: 'PATCH',
+    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(saveBody)
+  });
+}
