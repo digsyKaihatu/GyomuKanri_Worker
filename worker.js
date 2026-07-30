@@ -284,273 +284,271 @@ export default {
         return new Response(JSON.stringify({ success: true }), { headers: corsHeaders });
       }
 
-      // --- エンドポイント: 申請の承認処理 ---
-      if (url.pathname === "/approve-request" && request.method === "POST") {
-        const { requestId, adminId, adminName } = await request.json();
-        if (!requestId) {
-          return new Response(JSON.stringify({ success: false, error: "Missing requestId" }), { status: 400, headers: corsHeaders });
+      // --- エンドポイント: 申請の承認処理 (Read削減・最適化版) ---
+if (url.pathname === "/approve-request" && request.method === "POST") {
+  const { requestId, requestData, adminId, adminName } = await request.json();
+  if (!requestId || !requestData) {
+    return new Response(JSON.stringify({ success: false, error: "Missing requestId or requestData" }), { status: 400, headers: corsHeaders });
+  }
+
+  const serviceAccount = JSON.parse(env.FIREBASE_SERVICE_ACCOUNT);
+  const token = await getAccessToken(serviceAccount);
+  const projectId = serviceAccount.project_id;
+  const baseUrl = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents`;
+  const resourceRoot = `projects/${projectId}/databases/(default)/documents`;
+
+  // 💡 【Read削減 1】 フロントから渡された requestData をそのまま展開 (GET を廃止)
+  const reqType = requestData.type || "";
+  const requestDate = requestData.requestDate || "";
+  const userId = requestData.userId || "";
+  const userName = requestData.userName || "";
+  const targetLogId = requestData.targetLogId || (requestData.data && requestData.data.targetLogId) || null;
+
+  const d = requestData.data || {};
+  const dParsed = {
+    task: d.task || d.taskName || "",
+    goalId: d.goalId || null,
+    goalTitle: d.goalTitle || null,
+    count: parseInt(d.count || "0", 10),
+    beforeCount: parseInt(d.beforeCount || d.oldContribution || "0", 10), // 💡 件数修正の差分計算用
+    startTime: d.startTime || "",
+    endTime: d.endTime || "",
+    afterStartTime: d.afterStartTime || "",
+    afterEndTime: d.afterEndTime || "",
+    checkoutTime: d.checkoutTime || "",
+    memo: d.memo || ""
+  };
+
+  const writes = [];
+
+  const buildDateTimeISO = (dateStr, timeStr) => {
+    const formattedTime = timeStr.padStart(5, '0');
+    return `${dateStr}T${formattedTime}:00+09:00`;
+  };
+
+  let goalDiff = 0;
+  let goalTaskName = "";
+  let goalTargetId = "";
+
+  // 2. 申請タイプに応じた変更命令の組み立て
+  if (reqType === "add") {
+    // 💡 【Read削減 2】 crypto.randomUUID() ではなく「申請ID由来の固定ID」を使用
+    // 仮に連打や二重リトライが発生しても同じドキュメントが上書きされるため安全
+    const newLogId = "log_" + requestId;
+    const targetStartTime = dParsed.afterStartTime || dParsed.startTime;
+    const targetEndTime = dParsed.afterEndTime || dParsed.endTime;
+    const startISO = buildDateTimeISO(requestDate, targetStartTime);
+    const endISO = buildDateTimeISO(requestDate, targetEndTime);
+    const duration = Math.max(0, (new Date(endISO).getTime() - new Date(startISO).getTime()) / 1000);
+
+    const logFields = {
+      userId: { stringValue: userId },
+      userName: { stringValue: userName },
+      date: { stringValue: requestDate },
+      startTime: { timestampValue: startISO },
+      endTime: { timestampValue: endISO },
+      duration: { integerValue: String(duration) },
+      task: { stringValue: dParsed.task },
+      count: { integerValue: String(dParsed.count) },
+      contribution: { integerValue: String(dParsed.count) },
+      memo: { stringValue: dParsed.memo ? `${dParsed.memo} [追加申請承認済]` : "[追加申請承認済]" },
+      type: { stringValue: "work" }
+    };
+    if (dParsed.goalId) logFields.goalId = { stringValue: dParsed.goalId };
+    if (dParsed.goalTitle) logFields.goalTitle = { stringValue: dParsed.goalTitle };
+
+    writes.push({
+      update: { name: `${resourceRoot}/work_logs/${newLogId}`, fields: logFields }
+    });
+
+    if (dParsed.goalId && dParsed.count > 0) {
+      goalDiff = dParsed.count; goalTaskName = dParsed.task; goalTargetId = dParsed.goalId;
+    }
+  }
+  else if (reqType === "time_correct" || reqType === "update") {
+    if (!targetLogId) throw new Error("対象の元ログIDが見つかりません。");
+    const startISO = buildDateTimeISO(requestDate, dParsed.afterStartTime);
+    const endISO = buildDateTimeISO(requestDate, dParsed.afterEndTime);
+    const duration = Math.max(0, (new Date(endISO).getTime() - new Date(startISO).getTime()) / 1000);
+
+    writes.push({
+      update: {
+        name: `${resourceRoot}/work_logs/${targetLogId}`,
+        fields: {
+          task: { stringValue: dParsed.task },
+          goalId: dParsed.goalId ? { stringValue: dParsed.goalId } : { nullValue: null },
+          goalTitle: dParsed.goalTitle ? { stringValue: dParsed.goalTitle } : { nullValue: null },
+          startTime: { timestampValue: startISO },
+          endTime: { timestampValue: endISO },
+          duration: { integerValue: String(duration) },
+          memo: { stringValue: dParsed.memo ? `${dParsed.memo} [時間訂正承認済]` : "[時間訂正承認済]" }
         }
+      },
+      updateMask: { fieldPaths: ["task", "goalId", "goalTitle", "startTime", "endTime", "duration", "memo"] }
+    });
+  }
+  else if (reqType === "count_correct") {
+    if (!targetLogId) throw new Error("対象の元ログIDが見つかりません。");
 
-        const serviceAccount = JSON.parse(env.FIREBASE_SERVICE_ACCOUNT);
-        const token = await getAccessToken(serviceAccount);
-        const projectId = serviceAccount.project_id;
-        const baseUrl = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents`;
-        const resourceRoot = `projects/${projectId}/databases/(default)/documents`;
+    // 💡 【Read削減 3】 もしフロント側データに beforeCount / oldContribution が含まれていれば GET をスキップ
+    let diff = 0;
+    if (d.beforeCount !== undefined || d.oldContribution !== undefined) {
+      diff = dParsed.count - dParsed.beforeCount;
+    } else {
+      // フロントに旧データが無い場合のみフォールバック取得
+      const logRes = await fetch(`${baseUrl}/work_logs/${targetLogId}`, { headers: { 'Authorization': `Bearer ${token}` } });
+      if (!logRes.ok) throw new Error("修正対象の元ログが見つかりません。");
+      const logDoc = await logRes.json();
+      const oldLogFields = logDoc.fields;
+      const oldContribution = parseInt(oldLogFields.contribution?.integerValue || oldLogFields.count?.integerValue || "0", 10);
+      diff = dParsed.count - oldContribution;
+    }
 
-        // 1. 申請元データをFirestoreから取得
-        const reqRes = await fetch(`${baseUrl}/work_log_requests/${requestId}`, {
-          headers: { 'Authorization': `Bearer ${token}` }
-        });
-        if (!reqRes.ok) throw new Error(`申請データの取得に失敗しました: ${await reqRes.text()}`);
-        const reqDoc = await reqRes.json();
-        const fields = reqDoc.fields;
+    writes.push({
+      update: {
+        name: `${resourceRoot}/work_logs/${targetLogId}`,
+        fields: {
+          count: { integerValue: String(dParsed.count) },
+          contribution: { integerValue: String(dParsed.count) },
+          memo: { stringValue: dParsed.memo ? `${dParsed.memo} [件数修正承認済]` : "[件数修正承認済]" }
+        }
+      },
+      updateMask: { fieldPaths: ["count", "contribution", "memo"] }
+    });
 
-        const reqType = fields.type?.stringValue || "";
-        const requestDate = fields.requestDate?.stringValue || "";
-        const userId = fields.userId?.stringValue || "";
-        const userName = fields.userName?.stringValue || "";
-        const targetLogId = fields.targetLogId?.stringValue || null;
-
-        const dFields = fields.data?.mapValue?.fields || {};
-        const d = {
-          task: dFields.task?.stringValue || "",
-          goalId: dFields.goalId?.stringValue || null,
-          goalTitle: dFields.goalTitle?.stringValue || null,
-          count: parseInt(dFields.count?.integerValue || "0", 10),
-          startTime: dFields.startTime?.stringValue || "",
-          endTime: dFields.endTime?.stringValue || "",
-          afterStartTime: dFields.afterStartTime?.stringValue || "",
-          afterEndTime: dFields.afterEndTime?.stringValue || "",
-          checkoutTime: dFields.checkoutTime?.stringValue || "",
-          memo: dFields.memo?.stringValue || ""
-        };
-
-        const writes = [];
-
-        const buildDateTimeISO = (dateStr, timeStr) => {
-          const formattedTime = timeStr.padStart(5, '0');
-          return `${dateStr}T${formattedTime}:00+09:00`;
-        };
-
-        let goalDiff = 0;
-        let goalTaskName = "";
-        let goalTargetId = "";
-
-        // 2. 申請タイプに応じた変更命令の組み立て
-        if (reqType === "add") {
-          const newLogId = "log_" + crypto.randomUUID();
-          const targetStartTime = d.afterStartTime || d.startTime;
-          const targetEndTime = d.afterEndTime || d.endTime;
-          const startISO = buildDateTimeISO(requestDate, targetStartTime);
-          const endISO = buildDateTimeISO(requestDate, targetEndTime);
-          const duration = Math.max(0, (new Date(endISO).getTime() - new Date(startISO).getTime()) / 1000);
-
-          const logFields = {
-            userId: { stringValue: userId },
-            userName: { stringValue: userName },
-            date: { stringValue: requestDate },
-            startTime: { timestampValue: startISO },
-            endTime: { timestampValue: endISO },
-            duration: { integerValue: String(duration) },
-            task: { stringValue: d.task },
-            count: { integerValue: String(d.count) },
-            contribution: { integerValue: String(d.count) },
-            memo: { stringValue: d.memo ? `${d.memo} [追加申請承認済]` : "[追加申請承認済]" },
-            type: { stringValue: "work" }
-          };
-          if (d.goalId) logFields.goalId = { stringValue: d.goalId };
-          if (d.goalTitle) logFields.goalTitle = { stringValue: d.goalTitle };
-
-          writes.push({
-            update: { name: `${resourceRoot}/work_logs/${newLogId}`, fields: logFields }
-          });
-
-          if (d.goalId && d.count > 0) {
-            goalDiff = d.count; goalTaskName = d.task; goalTargetId = d.goalId;
+    if (dParsed.goalId && diff !== 0) {
+      goalDiff = diff; goalTaskName = dParsed.task; goalTargetId = dParsed.goalId;
+    }
+  }
+  else if (reqType === "forget_checkout") {
+    const queryBody = {
+      structuredQuery: {
+        from: [{ collectionId: "work_logs" }],
+        where: {
+          compositeFilter: {
+            op: "AND",
+            filters: [
+              { fieldFilter: { field: { fieldPath: "userId" }, op: "EQUAL", value: { stringValue: userId } } },
+              { fieldFilter: { field: { fieldPath: "date" }, op: "EQUAL", value: { stringValue: requestDate } } }
+            ]
           }
         }
-        else if (reqType === "time_correct" || reqType === "update") {
-          if (!targetLogId) throw new Error("対象の元ログIDが見つかりません。");
-          const startISO = buildDateTimeISO(requestDate, d.afterStartTime);
-          const endISO = buildDateTimeISO(requestDate, d.afterEndTime);
-          const duration = Math.max(0, (new Date(endISO).getTime() - new Date(startISO).getTime()) / 1000);
-
-          writes.push({
-            update: {
-              name: `${resourceRoot}/work_logs/${targetLogId}`,
-              fields: {
-                task: { stringValue: d.task },
-                goalId: d.goalId ? { stringValue: d.goalId } : { nullValue: null },
-                goalTitle: d.goalTitle ? { stringValue: d.goalTitle } : { nullValue: null },
-                startTime: { timestampValue: startISO },
-                endTime: { timestampValue: endISO },
-                duration: { integerValue: String(duration) },
-                memo: { stringValue: d.memo ? `${d.memo} [時間訂正承認済]` : "[時間訂正承認済]" }
-              }
-            },
-            updateMask: { fieldPaths: ["task", "goalId", "goalTitle", "startTime", "endTime", "duration", "memo"] }
-          });
-        }
-        else if (reqType === "count_correct") {
-          if (!targetLogId) throw new Error("対象の元ログIDが見つかりません。");
-          const logRes = await fetch(`${baseUrl}/work_logs/${targetLogId}`, { headers: { 'Authorization': `Bearer ${token}` } });
-          if (!logRes.ok) throw new Error("修正対象の元ログが見つかりません。削除された可能性があります。");
-          const logDoc = await logRes.json();
-          
-          const oldLogFields = logDoc.fields;
-          const oldTask = oldLogFields.task?.stringValue || "";
-          const oldGoalId = oldLogFields.goalId?.stringValue || null;
-          const oldContribution = parseInt(oldLogFields.contribution?.integerValue || oldLogFields.count?.integerValue || "0", 10);
-          const diff = d.count - oldContribution;
-
-          writes.push({
-            update: {
-              name: `${resourceRoot}/work_logs/${targetLogId}`,
-              fields: {
-                count: { integerValue: String(d.count) },
-                contribution: { integerValue: String(d.count) },
-                memo: { stringValue: d.memo ? `${d.memo} [件数修正承認済]` : "[件数修正承認済]" }
-              }
-            },
-            updateMask: { fieldPaths: ["count", "contribution", "memo"] }
-          });
-
-          if (oldGoalId && diff !== 0) {
-            goalDiff = diff; goalTaskName = oldTask; goalTargetId = oldGoalId;
-          }
-        }
-        else if (reqType === "forget_checkout") {
-          const queryBody = {
-            structuredQuery: {
-              from: [{ collectionId: "work_logs" }],
-              where: {
-                compositeFilter: {
-                  op: "AND",
-                  filters: [
-                    { fieldFilter: { field: { fieldPath: "userId" }, op: "EQUAL", value: { stringValue: userId } } },
-                    { fieldFilter: { field: { fieldPath: "date" }, op: "EQUAL", value: { stringValue: requestDate } } }
-                  ]
-                }
-              }
-            }
-          };
-
-          const qRes = await fetch(`${baseUrl}:runQuery`, {
-            method: 'POST', headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify(queryBody)
-          });
-          const qResults = await qRes.json();
-          const targetCheckoutTime = d.afterEndTime || d.checkoutTime;
-          const checkoutTimeISO = buildDateTimeISO(requestDate, targetCheckoutTime);
-          const checkoutTimeMs = new Date(checkoutTimeISO).getTime();
-
-          const logsForDay = [];
-          for (const item of qResults) {
-            if (item.document && item.document.fields) {
-              const f = item.document.fields;
-              const id = item.document.name.split('/').pop();
-              const sTime = f.startTime?.timestampValue || "";
-              logsForDay.push({ id, startTimeMs: new Date(sTime).getTime(), fields: f });
-            }
-          }
-
-          if (logsForDay.length === 0) throw new Error("該当日に勤務ログが存在しません。");
-          logsForDay.sort((a, b) => b.startTimeMs - a.startTimeMs);
-
-          const lastLogToUpdate = logsForDay.find(log => log.startTimeMs < checkoutTimeMs);
-          if (!lastLogToUpdate) throw new Error("申告退勤時刻より前に開始されたログがありません。");
-
-          const newDuration = Math.max(0, Math.floor((checkoutTimeMs - lastLogToUpdate.startTimeMs) / 1000));
-
-          writes.push({
-            update: {
-              name: `${resourceRoot}/work_logs/${lastLogToUpdate.id}`,
-              fields: {
-                endTime: { timestampValue: checkoutTimeISO },
-                duration: { integerValue: String(newDuration) },
-                memo: { stringValue: d.memo ? `${d.memo} [退勤忘れ修正承認済]` : "[退勤忘れ修正承認済]" }
-              }
-            },
-            updateMask: { fieldPaths: ["endTime", "duration", "memo"] }
-          });
-
-          for (const log of logsForDay) {
-            if (log.startTimeMs > lastLogToUpdate.startTimeMs) {
-              writes.push({ delete: `${resourceRoot}/work_logs/${log.id}` });
-            }
-          }
-
-          writes.push({
-            update: {
-              name: `${resourceRoot}/work_status/${userId}`,
-              fields: { needsCheckoutCorrection: { booleanValue: false } }
-            },
-            updateMask: { fieldPaths: ["needsCheckoutCorrection"] }
-          });
-        }
-
-        // 3. 工数進捗マスター(settings/tasks)の同期
-        if (goalDiff !== 0 && goalTaskName && goalTargetId) {
-          const tasksRes = await fetch(`${baseUrl}/settings/tasks`, { headers: { 'Authorization': `Bearer ${token}` } });
-          if (tasksRes.ok) {
-            const tasksDoc = await tasksRes.json();
-            const listValues = tasksDoc.fields?.list?.arrayValue?.values || [];
-
-            for (const taskVal of listValues) {
-              const tFields = taskVal.mapValue?.fields || {};
-              if (tFields.name?.stringValue === goalTaskName) {
-                const goalsList = tFields.goals?.arrayValue?.values || [];
-                for (const goalVal of goalsList) {
-                  const gFields = goalVal.mapValue?.fields || {};
-                  if (gFields.id?.stringValue === goalTargetId || gFields.title?.stringValue === goalTargetId) {
-                    const currentVal = parseInt(gFields.current?.integerValue || "0", 10);
-                    gFields.current = { integerValue: String(Math.max(0, currentVal + goalDiff)) };
-                  }
-                }
-              }
-            }
-            writes.push({
-              update: { name: `${resourceRoot}/settings/tasks`, fields: { list: { arrayValue: { values: listValues } } } }
-            });
-          }
-        }
-
-        // 4. 申請自身のステータスを "approved" に変更
-        writes.push({
-          update: {
-            name: `${resourceRoot}/work_log_requests/${requestId}`,
-            fields: {
-              status: { stringValue: "approved" },
-              approverId: { stringValue: adminId },
-              approverName: { stringValue: adminName },
-              approvedAt: { stringValue: getJSTISOString() }
-            }
-          },
-          updateMask: { fieldPaths: ["status", "approverId", "approverName", "approvedAt"] }
-        });
-
-        // 5. コミット送信
-        const commitRes = await fetch(`https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents:commit`, {
-          method: 'POST',
-          headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ writes })
-        });
-        if (!commitRes.ok) throw new Error(`一括コミットに失敗しました: ${await commitRes.text()}`);
-
-        // 6. 再集計の実行とCDNキャッシュの破棄
-        // 🌟 修正ポイント: Read数最少化！
-        // 「過去日」の申請承認時のみ daily_summaries の再集計と CDN キャッシュクリアを実行
-        // (「今日」の申請は work_logs の書き換えのみで完結させ、00:05 の夜間バッチでサマリー化)
-        const todayStr = getJSTDateString();
-        if (requestDate < todayStr) {
-          await aggregateAndSaveDate(requestDate, projectId, token);
-          await purgeDailySummaryCache(request.url, requestDate);
-        }
-
-        return new Response(JSON.stringify({ success: true, message: "Successfully approved." }), {
-          headers: { ...corsHeaders, "Content-Type": "application/json" }
-        });
       }
+    };
+
+    const qRes = await fetch(`${baseUrl}:runQuery`, {
+      method: 'POST', headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(queryBody)
+    });
+    const qResults = await qRes.json();
+    const targetCheckoutTime = dParsed.afterEndTime || dParsed.checkoutTime;
+    const checkoutTimeISO = buildDateTimeISO(requestDate, targetCheckoutTime);
+    const checkoutTimeMs = new Date(checkoutTimeISO).getTime();
+
+    const logsForDay = [];
+    for (const item of qResults) {
+      if (item.document && item.document.fields) {
+        const f = item.document.fields;
+        const id = item.document.name.split('/').pop();
+        const sTime = f.startTime?.timestampValue || "";
+        logsForDay.push({ id, startTimeMs: new Date(sTime).getTime(), fields: f });
+      }
+    }
+
+    if (logsForDay.length === 0) throw new Error("該当日に勤務ログが存在しません。");
+    logsForDay.sort((a, b) => b.startTimeMs - a.startTimeMs);
+
+    const lastLogToUpdate = logsForDay.find(log => log.startTimeMs < checkoutTimeMs);
+    if (!lastLogToUpdate) throw new Error("申告退勤時刻より前に開始されたログがありません。");
+
+    const newDuration = Math.max(0, Math.floor((checkoutTimeMs - lastLogToUpdate.startTimeMs) / 1000));
+
+    writes.push({
+      update: {
+        name: `${resourceRoot}/work_logs/${lastLogToUpdate.id}`,
+        fields: {
+          endTime: { timestampValue: checkoutTimeISO },
+          duration: { integerValue: String(newDuration) },
+          memo: { stringValue: dParsed.memo ? `${dParsed.memo} [退勤忘れ修正承認済]` : "[退勤忘れ修正承認済]" }
+        }
+      },
+      updateMask: { fieldPaths: ["endTime", "duration", "memo"] }
+    });
+
+    for (const log of logsForDay) {
+      if (log.startTimeMs > lastLogToUpdate.startTimeMs) {
+        writes.push({ delete: `${resourceRoot}/work_logs/${log.id}` });
+      }
+    }
+
+    writes.push({
+      update: {
+        name: `${resourceRoot}/work_status/${userId}`,
+        fields: { needsCheckoutCorrection: { booleanValue: false } }
+      },
+      updateMask: { fieldPaths: ["needsCheckoutCorrection"] }
+    });
+  }
+
+  // 3. 工数進捗マスター(settings/tasks)の同期
+  if (goalDiff !== 0 && goalTaskName && goalTargetId) {
+    const tasksRes = await fetch(`${baseUrl}/settings/tasks`, { headers: { 'Authorization': `Bearer ${token}` } });
+    if (tasksRes.ok) {
+      const tasksDoc = await tasksRes.json();
+      const listValues = tasksDoc.fields?.list?.arrayValue?.values || [];
+
+      for (const taskVal of listValues) {
+        const tFields = taskVal.mapValue?.fields || {};
+        if (tFields.name?.stringValue === goalTaskName) {
+          const goalsList = tFields.goals?.arrayValue?.values || [];
+          for (const goalVal of goalsList) {
+            const gFields = goalVal.mapValue?.fields || {};
+            if (gFields.id?.stringValue === goalTargetId || gFields.title?.stringValue === goalTargetId) {
+              const currentVal = parseInt(gFields.current?.integerValue || "0", 10);
+              gFields.current = { integerValue: String(Math.max(0, currentVal + goalDiff)) };
+            }
+          }
+        }
+      }
+      writes.push({
+        update: { name: `${resourceRoot}/settings/tasks`, fields: { list: { arrayValue: { values: listValues } } } }
+      });
+    }
+  }
+
+  // 4. 申請自身のステータスを "approved" に変更
+  writes.push({
+    update: {
+      name: `${resourceRoot}/work_log_requests/${requestId}`,
+      fields: {
+        status: { stringValue: "approved" },
+        approverId: { stringValue: adminId },
+        approverName: { stringValue: adminName },
+        approvedAt: { stringValue: getJSTISOString() }
+      }
+    },
+    updateMask: { fieldPaths: ["status", "approverId", "approverName", "approvedAt"] }
+  });
+
+  // 5. コミット送信 (Write 実行)
+  const commitRes = await fetch(`https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents:commit`, {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ writes })
+  });
+  if (!commitRes.ok) throw new Error(`一括コミットに失敗しました: ${await commitRes.text()}`);
+
+  // 6. 再集計の実行とCDNキャッシュの破棄 (「過去日」のみ)
+  const todayStr = getJSTDateString();
+  if (requestDate < todayStr) {
+    await aggregateAndSaveDate(requestDate, projectId, token);
+    await purgeDailySummaryCache(request.url, requestDate);
+  }
+
+  return new Response(JSON.stringify({ success: true, message: "Successfully approved." }), {
+    headers: { ...corsHeaders, "Content-Type": "application/json" }
+  });
+}
 
       // --- エンドポイント: 申請の却下処理 ---
       if (url.pathname === "/reject-request" && request.method === "POST") {
