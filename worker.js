@@ -658,7 +658,7 @@ export default {
         // 🌟 404だけでなく、過去日なのにログが0件保存されている場合も work_logs から自動再集計
         if (fsResp.status === 404 || !Array.isArray(logs) || logs.length === 0) {
           try {
-            const aggResult = await aggregateAndSaveDate(date, projectId, token);
+            // const aggResult = await aggregateAndSaveDate(date, projectId, token);
             if (aggResult.logsCount > 0) {
               fsResp = await fetch(fsUrl, { headers: { 'Authorization': `Bearer ${token}` } });
               if (fsResp.ok) {
